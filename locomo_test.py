@@ -15,7 +15,7 @@ import json
 import os
 import sys
 import ast
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime
 import time
 from pathlib import Path
@@ -23,7 +23,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 import dotenv
-dotenv.load_dotenv()
+dotenv.load_dotenv(dotenv_path=Path(".local/memu-experiment.env"), override=False)
+dotenv.load_dotenv(override=False)
 
 # 确保标准输出unbuffered
 if not hasattr(sys, '_stdout_line_buffering_set'):
@@ -38,6 +39,7 @@ if not hasattr(sys, '_stdout_line_buffering_set'):
 from mem_agent import MemAgent
 from response_agent import ResponseAgent
 from evaluate_agent import EvaluateAgent
+from groots_memory_adapter import GrootsMemoryExperimentAgent, GrootsMemoryTurn, GrootsTypeScriptMemoryBackend
 from memu.utils import get_logger, setup_logging
 
 # 设置带有flush的logger
@@ -64,9 +66,17 @@ class ToolBasedMemoryTester:
         api_version: str = "2024-02-01",
         memory_dir: str = "memory",
         max_workers: int = 3,
-        category_filter: Optional[List[str]] = None
+        category_filter: Optional[List[str]] = None,
+        eval_deployment: Optional[str] = None,
+        memory_backend: str = "memu",
+        groots_space_id: str = "locomo-space"
     ):
         """Initialize Tool-based Memory Tester"""
+        self.memory_backend = memory_backend
+        self.groots_space_id = groots_space_id
+        self.memory_dir = Path(memory_dir)
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
         # Initialize MemAgent for memory management
         self.mem_agent = MemAgent(
             azure_endpoint=azure_endpoint,
@@ -95,25 +105,30 @@ class ToolBasedMemoryTester:
         self.evaluate_agent = EvaluateAgent(
             azure_endpoint=eval_azure_endpoint,
             api_key=eval_api_key,
-            # chat_deployment=chat_deployment,
-            chat_deployment="gpt-4.1",
+            chat_deployment=eval_deployment or chat_deployment,
             use_entra_id=use_entra_id,
             api_version=api_version
-            # api_version="2025-01-01-preview"
         )
+
+        self.groots_backend = None
+        self.groots_agent = None
+        if self.memory_backend == "groots-ts":
+            self.groots_backend = GrootsTypeScriptMemoryBackend(
+                self.memory_dir / "groots_memory_store.json",
+                enabled_space_ids=[self.groots_space_id],
+            )
+            self.groots_agent = GrootsMemoryExperimentAgent(self.groots_backend)
         
         self.max_workers = max_workers
         self.category_filter = category_filter
         self.results = []
         self.processing_time = 0.0
-        self.memory_dir = Path(memory_dir)
-        
         # Initialize error log file
         self.log_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.error_log_file = f"qa_error_log_{self.log_timestamp}.txt"
         self._init_error_log()
         
-        logger.info(f"Tool-based Memory Tester initialized with MemAgent (memory) and ResponseAgent (QA) (max_workers={max_workers})")
+        logger.info(f"Tool-based Memory Tester initialized with backend={self.memory_backend} (max_workers={max_workers})")
         if category_filter:
             logger.info(f"Category filter enabled: {category_filter}")
         logger.info(f"QA error log file: {self.error_log_file}")
@@ -277,6 +292,9 @@ class ToolBasedMemoryTester:
         
         try:
             logger.info(f"Processing {session_key} with {len(session_utterances)} utterances on {session_date}")
+
+            if self.memory_backend == "groots-ts":
+                return self._process_single_session_with_groots(session_data, characters)
             
             _use_image = getattr(args_global, 'use_image', False)
             # Directly call update_character_memory function
@@ -315,6 +333,41 @@ class ToolBasedMemoryTester:
                 'utterances_count': len(session_utterances) if session_utterances else 0,
                 'session_date': session_date
             }
+
+    def _format_session_transcript(self, session_utterances: List[Dict], session_date: str) -> str:
+        """Format a LoCoMo session as plain text for the Groots memory fixture."""
+        lines = [f"Session date: {session_date}"]
+        for utterance in session_utterances:
+            speaker = utterance.get("speaker", "Unknown")
+            text = utterance.get("text", "")
+            if text:
+                lines.append(f"{speaker}: {text}")
+        return "\n\n".join(lines)
+
+    def _process_single_session_with_groots(self, session_data: Tuple[str, List[Dict], str], characters: List[str]) -> Dict:
+        """Process a single session using Groots' real TypeScript memory service."""
+        if self.groots_backend is None:
+            raise RuntimeError("Groots memory backend is not initialized")
+
+        session_key, session_utterances, session_date = session_data
+        transcript = self._format_session_transcript(session_utterances, session_date)
+        item_count = self.groots_backend.memorize_space_file(
+            content_text=transcript,
+            entry_id=session_key,
+            organization_id="locomo",
+            path=f"/locomo/{'-'.join(characters)}/{session_key}.txt",
+            space_id=self.groots_space_id,
+            title=f"{session_key} {session_date}",
+            version="1",
+        )
+        return {
+            'session_key': session_key,
+            'success': True,
+            'utterances_count': len(session_utterances),
+            'session_date': session_date,
+            'memory_items': item_count,
+            'memory_backend': self.memory_backend,
+        }
 
     def _process_sessions_parallel(self, sessions: List[Tuple[str, List[Dict], str]], characters: List[str], max_workers: int = 3) -> List[Dict]:
         """Process multiple sessions in parallel"""
@@ -355,8 +408,9 @@ class ToolBasedMemoryTester:
                         'session_date': 'Unknown'
                     })
 
-        for character_name in characters:
-            self.mem_agent.clean_profile(character_name)
+        if self.memory_backend == "memu":
+            for character_name in characters:
+                self.mem_agent.clean_profile(character_name)
         
         # Sort results by session key for consistent output
         session_results.sort(key=lambda x: x['session_key'])
@@ -442,12 +496,19 @@ class ToolBasedMemoryTester:
             logger.info(f"[QA {qa_index+1}] Answering question in category '{category}': {question[:100]}...")
             
             use_profile = getattr(args_global, 'use_profile', "none")
-            
-            # Use ResponseAgent to answer the question directly
-            answer_result = self.response_agent.execute_tool("answer_question", 
-                                                             question=question,
-                                                             characters=characters,
-                                                             use_profile=use_profile)
+
+            if self.memory_backend == "groots-ts":
+                answer_result = self._answer_question_with_groots_memory(
+                    question=question,
+                    characters=characters,
+                    qa_index=qa_index,
+                )
+            else:
+                # Use ResponseAgent to answer the question directly
+                answer_result = self.response_agent.execute_tool("answer_question", 
+                                                                 question=question,
+                                                                 characters=characters,
+                                                                 use_profile=use_profile)
             
             # Extract information from ResponseAgent result
             if answer_result.get("success", False):
@@ -554,6 +615,52 @@ class ToolBasedMemoryTester:
             
             return error_result
 
+    def _answer_question_with_groots_memory(self, question: str, characters: List[str], qa_index: int) -> Dict[str, Any]:
+        """Retrieve with Groots memory, then generate with the configured response LLM."""
+        if self.groots_backend is None:
+            raise RuntimeError("Groots memory backend is not initialized")
+
+        retrieval = self.groots_backend.retrieve(
+            agent_id="locomo-agent",
+            organization_id="locomo",
+            prompt=question,
+            session_id="locomo-session",
+            session_run_id=f"qa-{qa_index}",
+            space_ids=[self.groots_space_id],
+        )
+        retrieved_events = [
+            {
+                "character": snippet.space_id,
+                "combined_score": snippet.score,
+                "event": snippet.summary,
+                "memory_type": snippet.memory_type,
+                "rank": index + 1,
+                "score": snippet.score,
+                "type": snippet.memory_type,
+            }
+            for index, snippet in enumerate(retrieval.snippets)
+        ]
+        context_data = {
+            "question": question,
+            "relevant_events": retrieved_events,
+            "all_content": [snippet.summary for snippet in retrieval.snippets],
+            "character_profile": "",
+        }
+        generated_answer = self.response_agent._generate_answer(context_data)
+
+        return {
+            "answer": generated_answer,
+            "context_used": {
+                "characters_searched": characters,
+                "content_pieces": len(retrieved_events),
+                "total_events_found": len(retrieved_events),
+            },
+            "final_content": [snippet.summary for snippet in retrieval.snippets],
+            "groots_context_block": retrieval.context_block,
+            "retrieved_events": retrieved_events,
+            "success": True,
+        }
+
     def _map_evidence_to_conversation(self, evidence_refs: List[str], conversation_data: Dict) -> str:
         """Map evidence references (like 'D1:3') to actual conversation content"""
         evidence_conversations = []
@@ -642,12 +749,15 @@ class ToolBasedMemoryTester:
             logger.warning("No valid QA items to process")
             return []
         
-        logger.info(f"Caching event semantic embeddings for characters: {characters}")
-        self.response_agent.cache_events_semantic(characters)
-        if getattr(args_global, 'use_profile', "none") == "search":
-            logger.info(f"Caching profile semantic embeddings for characters: {characters}")
-            self.response_agent.cache_profile_semantic(characters)
-        logger.info("Caching completed")
+        if self.memory_backend == "memu":
+            logger.info(f"Caching event semantic embeddings for characters: {characters}")
+            self.response_agent.cache_events_semantic(characters)
+            if getattr(args_global, 'use_profile', "none") == "search":
+                logger.info(f"Caching profile semantic embeddings for characters: {characters}")
+                self.response_agent.cache_profile_semantic(characters)
+            logger.info("Caching completed")
+        else:
+            logger.info("Skipping memU embedding cache because Groots memory backend is active")
 
         # Use ThreadPoolExecutor for parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -800,10 +910,23 @@ class ToolBasedMemoryTester:
 
             if getattr(args_global, 'force_resum', False):
                 logger.info("Force redo the memory summarization")
-                self.mem_agent.clear_character_memory(characters)
+                if self.memory_backend == "groots-ts":
+                    if self.groots_backend is not None:
+                        self.groots_backend.reset()
+                else:
+                    self.mem_agent.clear_character_memory(characters)
 
                 characters_with_memory = []
                 characters_without_memory = characters
+            elif self.memory_backend == "groots-ts":
+                store_path = self.memory_dir / "groots_memory_store.json"
+                if store_path.exists() and store_path.stat().st_size > 0:
+                    logger.info("Groots memory store already exists, skipping session processing")
+                    characters_with_memory = characters
+                    characters_without_memory = []
+                else:
+                    characters_with_memory = []
+                    characters_without_memory = characters
             else:
                 memory_status = self._check_memory_exists(characters)
                 characters_with_memory = [char for char, has_memory in memory_status.items() if has_memory]
@@ -1186,6 +1309,9 @@ def main():
     parser.add_argument('--sample-use', type=str, help='Sample indices to use. Can be a single number (e.g., "5" for first 5 samples) or a list (e.g., "[0, 1, 3, 5]" for specific indices). If not provided, use all samples.')
     parser.add_argument('--memory-dir', default='memory', help='Directory for memory files')
     parser.add_argument('--chat-deployment', default='gpt-4.1-mini', help='Azure OpenAI chat deployment')
+    parser.add_argument('--eval-deployment', help='Model used for grading answers. Defaults to --chat-deployment')
+    parser.add_argument('--memory-backend', choices=['memu', 'groots-ts'], default='memu', help='Memory backend to benchmark')
+    parser.add_argument('--groots-space-id', default='locomo-space', help='Space id used by the Groots memory fixture')
     # parser.add_argument('--chat-deployment', default='DeepSeek-V3-0324', help='Azure OpenAI chat deployment')
     parser.add_argument('--max-workers', type=int, default=5, help='Maximum number of parallel workers for session processing')
     parser.add_argument('--category', type=str, help='Filter questions by category. Can be a single category (e.g., "1") or comma-separated categories (e.g., "0,2,3"). If not provided, use all categories.')
@@ -1220,6 +1346,9 @@ def main():
     tester = ToolBasedMemoryTester(
         memory_dir=args.memory_dir,
         chat_deployment=args.chat_deployment,
+        eval_deployment=args.eval_deployment,
+        memory_backend=args.memory_backend,
+        groots_space_id=args.groots_space_id,
         max_workers=args.max_workers,
         category_filter=category_filter
     )
