@@ -69,11 +69,13 @@ class ToolBasedMemoryTester:
         category_filter: Optional[List[str]] = None,
         eval_deployment: Optional[str] = None,
         memory_backend: str = "memu",
-        groots_space_id: str = "locomo-space"
+        groots_space_id: str = "locomo-space",
+        disable_embeddings: bool = False
     ):
         """Initialize Tool-based Memory Tester"""
         self.memory_backend = memory_backend
         self.groots_space_id = groots_space_id
+        self.disable_embeddings = disable_embeddings
         self.memory_dir = Path(memory_dir)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +98,11 @@ class ToolBasedMemoryTester:
             api_version=api_version,
             memory_dir=memory_dir
         )
+
+        if self.disable_embeddings:
+            self.mem_agent.embedding_client = None
+            self.response_agent.embedding_client = None
+            logger.info("Embedding clients disabled; retrieval will use text fallback scoring")
         
         # Initialize EvaluateAgent for answer evaluation
         # Ensure azure_endpoint and api_key are not None for EvaluateAgent
@@ -749,13 +756,15 @@ class ToolBasedMemoryTester:
             logger.warning("No valid QA items to process")
             return []
         
-        if self.memory_backend == "memu":
+        if self.memory_backend == "memu" and not self.disable_embeddings:
             logger.info(f"Caching event semantic embeddings for characters: {characters}")
             self.response_agent.cache_events_semantic(characters)
             if getattr(args_global, 'use_profile', "none") == "search":
                 logger.info(f"Caching profile semantic embeddings for characters: {characters}")
                 self.response_agent.cache_profile_semantic(characters)
             logger.info("Caching completed")
+        elif self.memory_backend == "memu":
+            logger.info("Skipping memU embedding cache because embeddings are disabled")
         else:
             logger.info("Skipping memU embedding cache because Groots memory backend is active")
 
@@ -1312,6 +1321,7 @@ def main():
     parser.add_argument('--eval-deployment', help='Model used for grading answers. Defaults to --chat-deployment')
     parser.add_argument('--memory-backend', choices=['memu', 'groots-ts'], default='memu', help='Memory backend to benchmark')
     parser.add_argument('--groots-space-id', default='locomo-space', help='Space id used by the Groots memory fixture')
+    parser.add_argument('--disable-embeddings', action='store_true', help='Disable embedding clients and use text fallback retrieval')
     # parser.add_argument('--chat-deployment', default='DeepSeek-V3-0324', help='Azure OpenAI chat deployment')
     parser.add_argument('--max-workers', type=int, default=5, help='Maximum number of parallel workers for session processing')
     parser.add_argument('--category', type=str, help='Filter questions by category. Can be a single category (e.g., "1") or comma-separated categories (e.g., "0,2,3"). If not provided, use all categories.')
@@ -1349,6 +1359,7 @@ def main():
         eval_deployment=args.eval_deployment,
         memory_backend=args.memory_backend,
         groots_space_id=args.groots_space_id,
+        disable_embeddings=args.disable_embeddings,
         max_workers=args.max_workers,
         category_filter=category_filter
     )
