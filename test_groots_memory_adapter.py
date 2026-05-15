@@ -5,15 +5,15 @@ from pathlib import Path
 from groots_memory_adapter import (
     GrootsMemoryExperimentAgent,
     GrootsMemoryTurn,
-    JsonlGrootsMemoryBackend,
+    GrootsTypeScriptMemoryBackend,
 )
 
 
 class GrootsMemoryAdapterTest(unittest.TestCase):
     def test_retrieve_before_generation_injects_relevant_memory(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "memory.jsonl"
-            backend = JsonlGrootsMemoryBackend(path)
+            path = Path(directory) / "memory.json"
+            backend = GrootsTypeScriptMemoryBackend(path, enabled_space_ids=["space-1"])
             backend.memorize(
                 GrootsMemoryTurn(
                     agent_id="agent-1",
@@ -40,10 +40,10 @@ class GrootsMemoryAdapterTest(unittest.TestCase):
             self.assertIn("Atlas launch moved to July", prompt)
             self.assertIn("<user_request>", prompt)
 
-    def test_memorize_after_turn_appends_one_record_per_space(self):
+    def test_memorize_after_turn_indexes_enabled_spaces(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "memory.jsonl"
-            backend = JsonlGrootsMemoryBackend(path)
+            path = Path(directory) / "memory.json"
+            backend = GrootsTypeScriptMemoryBackend(path, enabled_space_ids=["space-1", "space-2"])
             agent = GrootsMemoryExperimentAgent(backend)
 
             count = agent.memorize_after_turn(
@@ -58,11 +58,38 @@ class GrootsMemoryAdapterTest(unittest.TestCase):
                 )
             )
 
+            self.assertGreaterEqual(count, 2)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("space-1", content)
+            self.assertIn("space-2", content)
+
+    def test_space_file_memory_uses_groots_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.json"
+            backend = GrootsTypeScriptMemoryBackend(path, enabled_space_ids=["space-1"])
+
+            count = backend.memorize_space_file(
+                content_text=(
+                    "Atlas deployment notes live here and include rollback steps.\n\n"
+                    "The release owner is the platform team."
+                ),
+                entry_id="entry-1",
+                organization_id="org-1",
+                path="/Atlas.md",
+                space_id="space-1",
+            )
+            retrieval = backend.retrieve(
+                agent_id="agent-1",
+                organization_id="org-1",
+                prompt="Who owns the Atlas release?",
+                session_id="session-1",
+                session_run_id="run-1",
+                space_ids=["space-1"],
+            )
+
             self.assertEqual(count, 2)
-            lines = path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(lines), 2)
-            self.assertIn("space-1", lines[0])
-            self.assertIn("space-2", lines[1])
+            self.assertTrue(retrieval.context_block)
+            self.assertIn("platform team", retrieval.context_block or "")
 
 
 if __name__ == "__main__":

@@ -1,31 +1,26 @@
 """
 Groots memory experiment adapter.
 
-This module gives the LoCoMo experiment code a stable seam for testing the
-Groots memory contract without depending on a live Groots API yet:
+The benchmark-side code in this file does not reimplement Groots memory. It
+invokes the TypeScript fixture in the sibling `groots` repo, which imports and
+runs the real `SpaceMemoryService` implementation.
+
+Contract under test:
 
     retrieve() before generation, memorize() after the turn.
-
-The default backend is a small JSONL text store so benchmark plumbing can be
-developed and tested offline. A future HTTP/D1-backed backend can implement the
-same interface without changing the experiment runner.
 """
 
 from __future__ import annotations
 
 import json
-import math
-import re
+import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Protocol
+from typing import Dict, List, Optional, Protocol
 
 
-TOKEN_PATTERN = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
-
-
-def tokenize(text: str) -> List[str]:
-    return [token.lower() for token in TOKEN_PATTERN.findall(text)]
+DEFAULT_GROOTS_REPO = Path(__file__).resolve().parents[1] / "groots"
 
 
 @dataclass(frozen=True)
@@ -36,6 +31,12 @@ class GrootsMemorySnippet:
     memory_type: str = "knowledge"
     score: float = 0.0
     metadata: Dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GrootsMemoryRetrieval:
+    context_block: Optional[str]
+    snippets: List[GrootsMemorySnippet]
 
 
 @dataclass(frozen=True)
@@ -60,39 +61,65 @@ class GrootsMemoryBackend(Protocol):
         session_run_id: str,
         space_ids: List[str],
         top_k: int = 8,
-    ) -> List[GrootsMemorySnippet]:
+    ) -> GrootsMemoryRetrieval:
         ...
 
     def memorize(self, turn: GrootsMemoryTurn) -> int:
         ...
 
 
-class JsonlGrootsMemoryBackend:
+class GrootsTypeScriptMemoryBackend:
     """
-    Offline text backend for experiment development.
+    Subprocess bridge to Groots' real TypeScript memory service.
 
-    Records are JSON lines with at least `space_id` and `summary`. Retrieval uses
-    a small BM25 implementation, matching Groots' current no-vector-db direction.
+    The fixture stores records in JSON so experiments can run without a live
+    Cloudflare D1 binding. Retrieval/extraction/context formatting still come
+    from Groots TypeScript modules.
     """
 
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        storage_path: str | Path,
+        *,
+        enabled_space_ids: Optional[List[str]] = None,
+        groots_repo: str | Path | None = None,
+    ):
+        self.storage_path = Path(storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self.enabled_space_ids = enabled_space_ids or ["experiment-space"]
+        self.groots_repo = Path(groots_repo or os.getenv("GROOTS_REPO_PATH") or DEFAULT_GROOTS_REPO)
+        self.fixture_path = self.groots_repo / "apps/api/bin/space-memory-fixture.ts"
 
-    def _read_records(self) -> List[Dict[str, object]]:
-        if not self.path.exists():
-            return []
+    def _run_fixture(self, payload: Dict[str, object]) -> Dict[str, object]:
+        if not self.fixture_path.exists():
+            raise FileNotFoundError(f"Groots memory fixture not found: {self.fixture_path}")
 
-        records: List[Dict[str, object]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            records.append(json.loads(line))
-        return records
+        command = ["bun", "run", str(self.fixture_path)]
+        completed = subprocess.run(
+            command,
+            cwd=self.groots_repo,
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Groots memory fixture failed\n"
+                f"command: {' '.join(command)}\n"
+                f"stdout: {completed.stdout}\n"
+                f"stderr: {completed.stderr}"
+            )
 
-    def _append_record(self, record: Dict[str, object]) -> None:
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return json.loads(completed.stdout)
+
+    def reset(self) -> None:
+        self._run_fixture(
+            {
+                "command": "reset",
+                "storagePath": str(self.storage_path),
+            }
+        )
 
     def retrieve(
         self,
@@ -104,58 +131,88 @@ class JsonlGrootsMemoryBackend:
         session_run_id: str,
         space_ids: List[str],
         top_k: int = 8,
-    ) -> List[GrootsMemorySnippet]:
-        del agent_id, organization_id, session_id, session_run_id
+    ) -> GrootsMemoryRetrieval:
+        del top_k
 
-        records = [
-            record
-            for record in self._read_records()
-            if str(record.get("space_id", "")) in set(space_ids)
-        ]
-        scored = _bm25(prompt, records)
+        response = self._run_fixture(
+            {
+                "command": "retrieve",
+                "enabledSpaceIds": self.enabled_space_ids,
+                "request": {
+                    "agentId": agent_id,
+                    "organizationId": organization_id,
+                    "prompt": prompt,
+                    "sessionId": session_id,
+                    "sessionRunId": session_run_id,
+                    "spaceIds": space_ids,
+                },
+                "storagePath": str(self.storage_path),
+            }
+        )
+        items = response.get("items", [])
 
-        return [
-            GrootsMemorySnippet(
-                id=str(record.get("id", f"memory-{index}")),
-                memory_type=str(record.get("memory_type", "knowledge")),
-                metadata=dict(record.get("metadata", {})),
-                score=score,
-                space_id=str(record["space_id"]),
-                summary=str(record["summary"]),
-            )
-            for index, (record, score) in enumerate(scored[:top_k], start=1)
-        ]
+        return GrootsMemoryRetrieval(
+            context_block=response.get("contextBlock"),
+            snippets=[
+                GrootsMemorySnippet(
+                    id=str(item["id"]),
+                    memory_type=str(item.get("memoryType", "knowledge")),
+                    metadata=dict(item.get("metadata", {})),
+                    score=float(item.get("score", 0.0)),
+                    space_id=str(item["spaceId"]),
+                    summary=str(item["summary"]),
+                )
+                for item in items
+            ],
+        )
 
     def memorize(self, turn: GrootsMemoryTurn) -> int:
-        text = "\n".join(
-            part
-            for part in [
-                f"User: {turn.user_text.strip()}",
-                f"Assistant: {turn.assistant_text.strip()}",
-            ]
-            if part.strip()
+        response = self._run_fixture(
+            {
+                "command": "memorizeTurn",
+                "enabledSpaceIds": self.enabled_space_ids,
+                "storagePath": str(self.storage_path),
+                "turn": {
+                    "agentId": turn.agent_id,
+                    "assistantText": turn.assistant_text,
+                    "organizationId": turn.organization_id,
+                    "sessionId": turn.session_id,
+                    "sessionRunId": turn.session_run_id,
+                    "spaceIds": turn.space_ids,
+                    "userText": turn.user_text,
+                },
+            }
         )
-        if not text.strip():
-            return 0
+        return int(response.get("itemCount", 0))
 
-        count = 0
-        for space_id in turn.space_ids:
-            self._append_record(
-                {
-                    "id": f"{turn.session_run_id}:{space_id}",
-                    "memory_type": "knowledge",
-                    "metadata": {
-                        "agent_id": turn.agent_id,
-                        "organization_id": turn.organization_id,
-                        "session_id": turn.session_id,
-                        "session_run_id": turn.session_run_id,
-                    },
-                    "space_id": space_id,
-                    "summary": text,
-                }
-            )
-            count += 1
-        return count
+    def memorize_space_file(
+        self,
+        *,
+        content_text: str,
+        entry_id: str,
+        organization_id: str,
+        path: str,
+        space_id: str,
+        title: Optional[str] = None,
+        version: str = "1",
+    ) -> int:
+        response = self._run_fixture(
+            {
+                "command": "memorizeSpaceFile",
+                "enabledSpaceIds": self.enabled_space_ids,
+                "input": {
+                    "contentText": content_text,
+                    "entryId": entry_id,
+                    "organizationId": organization_id,
+                    "path": path,
+                    "spaceId": space_id,
+                    "title": title,
+                    "version": version,
+                },
+                "storagePath": str(self.storage_path),
+            }
+        )
+        return int(response.get("itemCount", 0))
 
 
 class GrootsMemoryExperimentAgent:
@@ -173,7 +230,7 @@ class GrootsMemoryExperimentAgent:
         space_ids: List[str],
         top_k: int = 8,
     ) -> str:
-        snippets = self.backend.retrieve(
+        retrieval = self.backend.retrieve(
             agent_id=agent_id,
             organization_id=organization_id,
             prompt=prompt,
@@ -182,56 +239,10 @@ class GrootsMemoryExperimentAgent:
             space_ids=space_ids,
             top_k=top_k,
         )
-        if not snippets:
+        if not retrieval.context_block:
             return prompt
 
-        memory_lines = "\n".join(
-            f"- [{snippet.memory_type} space={snippet.space_id}] {snippet.summary}"
-            for snippet in snippets
-        )
-        return (
-            "<groots_space_memory>\n"
-            "Use these snippets only when relevant to the current question.\n"
-            f"{memory_lines}\n"
-            "</groots_space_memory>\n\n"
-            f"<user_request>\n{prompt}\n</user_request>"
-        )
+        return f"{retrieval.context_block}\n\n<user_request>\n{prompt}\n</user_request>"
 
     def memorize_after_turn(self, turn: GrootsMemoryTurn) -> int:
         return self.backend.memorize(turn)
-
-
-def _bm25(query: str, records: Iterable[Dict[str, object]]) -> List[tuple[Dict[str, object], float]]:
-    documents = list(records)
-    query_terms = set(tokenize(query))
-    if not query_terms or not documents:
-        return []
-
-    tokenized_docs = [tokenize(str(record.get("summary", ""))) for record in documents]
-    avg_len = sum(max(len(tokens), 1) for tokens in tokenized_docs) / len(tokenized_docs)
-    document_frequency: Dict[str, int] = {}
-    for terms in tokenized_docs:
-        for term in set(terms):
-            document_frequency[term] = document_frequency.get(term, 0) + 1
-
-    scored: List[tuple[Dict[str, object], float]] = []
-    for record, terms in zip(documents, tokenized_docs):
-        term_counts: Dict[str, int] = {}
-        for term in terms:
-            term_counts[term] = term_counts.get(term, 0) + 1
-
-        score = 0.0
-        length = max(len(terms), 1)
-        for term in query_terms:
-            frequency = term_counts.get(term, 0)
-            if frequency == 0:
-                continue
-
-            containing_docs = document_frequency.get(term, 0)
-            idf = math.log(1 + (len(documents) - containing_docs + 0.5) / (containing_docs + 0.5))
-            score += idf * ((frequency * 2.2) / (frequency + 1.2 * (0.25 + 0.75 * length / avg_len)))
-
-        if score > 0:
-            scored.append((record, score))
-
-    return sorted(scored, key=lambda item: item[1], reverse=True)
