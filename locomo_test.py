@@ -24,7 +24,6 @@ import threading
 
 import dotenv
 dotenv.load_dotenv(dotenv_path=Path(".tmp/memu-experiment.env"), override=False)
-dotenv.load_dotenv(dotenv_path=Path(".local/memu-experiment.env"), override=False)
 dotenv.load_dotenv(override=False)
 
 # 确保标准输出unbuffered
