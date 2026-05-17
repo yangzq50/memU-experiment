@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import dotenv
-dotenv.load_dotenv()
+dotenv.load_dotenv(dotenv_path=Path(".tmp/memu-experiment.env"), override=False)
 
 def check_openai_config():
     """Check OpenAI configuration"""
@@ -55,7 +55,7 @@ def suggest_fixes():
     print("TROUBLESHOOTING SUGGESTIONS")
     print("=" * 50)
     
-    print("1. Create a .env file in the current directory with:")
+    print("1. Create .tmp/memu-experiment.env in the current directory with:")
     print("   OPENAI_API_KEY=your_openai_api_key_here")
     print("")
     print("   # Optional: If using custom endpoint")
@@ -81,9 +81,9 @@ def main():
     print("OPENAI CLIENT CONFIGURATION CHECKER")
     print("This script helps diagnose OpenAI API configuration errors\n")
     
-    # Check current directory for .env file
-    env_file = Path(".env")
-    print(f".env file: {'✓ Found' if env_file.exists() else '✗ Not found'}")
+    # Check current directory for the only supported local config file.
+    env_file = Path(".tmp/memu-experiment.env")
+    print(f".tmp/memu-experiment.env file: {'✓ Found' if env_file.exists() else '✗ Not found'}")
     if env_file.exists():
         print(f"  Location: {env_file.absolute()}")
     
@@ -110,4 +110,4 @@ def main():
         suggest_fixes()
 
 if __name__ == "__main__":
-    main() 
+    main()

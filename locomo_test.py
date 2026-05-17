@@ -24,7 +24,6 @@ import threading
 
 import dotenv
 dotenv.load_dotenv(dotenv_path=Path(".tmp/memu-experiment.env"), override=False)
-dotenv.load_dotenv(override=False)
 
 # 确保标准输出unbuffered
 if not hasattr(sys, '_stdout_line_buffering_set'):
@@ -40,6 +39,7 @@ from mem_agent import MemAgent
 from response_agent import ResponseAgent
 from evaluate_agent import EvaluateAgent
 from groots_memory_adapter import GrootsMemoryExperimentAgent, GrootsMemoryTurn, GrootsTypeScriptMemoryBackend
+from benchmark_report import write_single_report
 from memu.utils import get_logger, setup_logging
 
 # 设置带有flush的logger
@@ -1387,12 +1387,25 @@ def main():
         output_file = f"enhanced_memory_test_results_{tester.log_timestamp}.json"
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
+
+        markdown_file = write_single_report(output_file)
         
         logger.info(f"Detailed results saved to: {output_file}")
+        logger.info(f"Markdown report saved to: {markdown_file}")
         
         # Calculate and report error statistics
-        total_questions = results['summary'].get('total_questions', 0)
-        total_correct = results['summary'].get('total_correct', 0)
+        total_questions = sum(
+            len(sample.get("question_results", []))
+            for sample in results.get("detailed_results", [])
+            if isinstance(sample, dict)
+        )
+        total_correct = sum(
+            1
+            for sample in results.get("detailed_results", [])
+            if isinstance(sample, dict)
+            for question in sample.get("question_results", [])
+            if isinstance(question, dict) and question.get("is_correct")
+        )
         total_incorrect = total_questions - total_correct
         
         if total_incorrect > 0:
