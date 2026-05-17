@@ -160,7 +160,7 @@ class GrootsTypeScriptMemoryBackend:
                     metadata=dict(item.get("metadata", {})),
                     score=float(item.get("score", 0.0)),
                     space_id=str(item["spaceId"]),
-                    summary=str(item["summary"]),
+                    summary=str(item["displayText"]),
                 )
                 for item in items
             ],
@@ -183,7 +183,7 @@ class GrootsTypeScriptMemoryBackend:
                 },
             }
         )
-        return int(response.get("itemCount", 0))
+        return int(response["searchDocumentCount"])
 
     def memorize_space_file(
         self,
@@ -212,7 +212,7 @@ class GrootsTypeScriptMemoryBackend:
                 "storagePath": str(self.storage_path),
             }
         )
-        return int(response.get("itemCount", 0))
+        return int(response["searchDocumentCount"])
 
 
 class GrootsMemoryExperimentAgent:
