@@ -37,6 +37,8 @@ class GrootsMemorySnippet:
 class GrootsMemoryRetrieval:
     context_block: Optional[str]
     snippets: List[GrootsMemorySnippet]
+    telemetry: Dict[str, object] = field(default_factory=dict)
+    trace: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class GrootsTypeScriptMemoryBackend:
         self.groots_repo = Path(groots_repo or os.getenv("GROOTS_REPO_PATH") or DEFAULT_GROOTS_REPO)
         self.fixture_path = self.groots_repo / "apps/api/bin/space-memory-fixture.ts"
         self.memory_model = memory_model
+        self.last_telemetry: Dict[str, object] = {}
 
     def _run_fixture(self, payload: Dict[str, object]) -> Dict[str, object]:
         if not self.fixture_path.exists():
@@ -117,7 +120,10 @@ class GrootsTypeScriptMemoryBackend:
                 f"stderr: {completed.stderr}"
             )
 
-        return json.loads(completed.stdout)
+        response = json.loads(completed.stdout)
+        telemetry = response.get("telemetry", {})
+        self.last_telemetry = telemetry if isinstance(telemetry, dict) else {}
+        return response
 
     def reset(self) -> None:
         self._run_fixture(
@@ -170,6 +176,8 @@ class GrootsTypeScriptMemoryBackend:
                 )
                 for item in items
             ],
+            telemetry=dict(response.get("telemetry", {})),
+            trace=dict(response.get("trace", {})),
         )
 
     def memorize(self, turn: GrootsMemoryTurn) -> int:

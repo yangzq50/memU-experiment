@@ -375,6 +375,7 @@ class ToolBasedMemoryTester:
             'session_date': session_date,
             'memory_items': item_count,
             'memory_backend': self.memory_backend,
+            'groots_telemetry': self.groots_backend.last_telemetry,
         }
 
     def _process_sessions_parallel(self, sessions: List[Tuple[str, List[Dict], str]], characters: List[str], max_workers: int = 3) -> List[Dict]:
@@ -501,6 +502,7 @@ class ToolBasedMemoryTester:
         question, answer, category, qa_index = qa_data
         
         try:
+            qa_started_at = time.perf_counter()
             logger.info(f"[QA {qa_index+1}] Answering question in category '{category}': {question[:100]}...")
             
             use_profile = getattr(args_global, 'use_profile', "none")
@@ -517,6 +519,7 @@ class ToolBasedMemoryTester:
                                                                  question=question,
                                                                  characters=characters,
                                                                  use_profile=use_profile)
+            answer_completed_at = time.perf_counter()
             
             # Extract information from ResponseAgent result
             if answer_result.get("success", False):
@@ -531,6 +534,7 @@ class ToolBasedMemoryTester:
             
             # Evaluate the answer
             evaluation = self._evaluate_answer(question, generated_answer, answer)
+            evaluation_completed_at = time.perf_counter()
             
             result = {
                 'qa_index': qa_index,
@@ -541,8 +545,17 @@ class ToolBasedMemoryTester:
                 'is_correct': evaluation['is_correct'],
                 'explanation': evaluation['explanation'],
                 'retrieved_content': retrieved_content,
-                'evidence': evidence_content
+                'evidence': evidence_content,
+                'benchmark_latency': {
+                    'answer_seconds': answer_completed_at - qa_started_at,
+                    'evaluation_seconds': evaluation_completed_at - answer_completed_at,
+                    'total_seconds': evaluation_completed_at - qa_started_at,
+                },
             }
+            if self.memory_backend == "groots-ts":
+                result['groots_trace'] = answer_result.get("groots_trace", {})
+                result['groots_telemetry'] = answer_result.get("groots_telemetry", {})
+                result['groots_latency'] = answer_result.get("groots_latency", {})
             
             # Log error details if answer is incorrect
             analyze_on = getattr(args_global, 'analyze_on', "wrong")
@@ -628,6 +641,7 @@ class ToolBasedMemoryTester:
         if self.groots_backend is None:
             raise RuntimeError("Groots memory backend is not initialized")
 
+        retrieval_started_at = time.perf_counter()
         retrieval = self.groots_backend.retrieve(
             agent_id="locomo-agent",
             organization_id="locomo",
@@ -636,6 +650,7 @@ class ToolBasedMemoryTester:
             session_run_id=f"qa-{qa_index}",
             space_ids=[self.groots_space_id],
         )
+        retrieval_completed_at = time.perf_counter()
         retrieved_events = [
             {
                 "character": snippet.space_id,
@@ -655,6 +670,7 @@ class ToolBasedMemoryTester:
             "character_profile": "",
         }
         generated_answer = self.response_agent._generate_answer(context_data)
+        generation_completed_at = time.perf_counter()
 
         return {
             "answer": generated_answer,
@@ -665,6 +681,12 @@ class ToolBasedMemoryTester:
             },
             "final_content": [snippet.summary for snippet in retrieval.snippets],
             "groots_context_block": retrieval.context_block,
+            "groots_telemetry": retrieval.telemetry,
+            "groots_trace": retrieval.trace,
+            "groots_latency": {
+                "generation_seconds": generation_completed_at - retrieval_completed_at,
+                "retrieve_seconds": retrieval_completed_at - retrieval_started_at,
+            },
             "retrieved_events": retrieved_events,
             "success": True,
         }
@@ -1002,6 +1024,7 @@ class ToolBasedMemoryTester:
                 'sessions_total': len(sessions),
                 'sessions_processed': sessions_actually_processed,
                 'sessions_skipped': sessions_skipped,
+                'session_results': session_results,
                 'questions_total': len(qa_data),
                 'questions_processed': len(question_results),
                 'questions_skipped': len(qa_data) - len(question_results),
@@ -1017,6 +1040,7 @@ class ToolBasedMemoryTester:
             return {
                 'characters': [],
                 'sessions_processed': 0,
+                'session_results': [],
                 'questions_processed': 0,
                 'question_results': [],
                 'category_stats': {},

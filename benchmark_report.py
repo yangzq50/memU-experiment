@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -90,6 +92,157 @@ def _question_results(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _wrong_examples(result: dict[str, Any], limit: int = 5) -> list[dict[str, Any]]:
     return [question for question in _question_results(result) if not question.get("is_correct")][:limit]
+
+
+def _collect_groots_spans(result: dict[str, Any]) -> list[dict[str, Any]]:
+    spans: list[dict[str, Any]] = []
+    for sample in result.get("detailed_results", []):
+        if not isinstance(sample, dict):
+            continue
+        for group_name in ("session_results", "question_results"):
+            records = sample.get(group_name, [])
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                telemetry = record.get("groots_telemetry", {})
+                if not isinstance(telemetry, dict):
+                    continue
+                raw_spans = telemetry.get("spans", [])
+                if isinstance(raw_spans, list):
+                    spans.extend(span for span in raw_spans if isinstance(span, dict))
+    return spans
+
+
+def _duration_stats(durations_ms: list[float]) -> dict[str, float | int]:
+    if not durations_ms:
+        return {
+            "calls": 0,
+            "total_ms": 0.0,
+            "average_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+        }
+
+    sorted_durations = sorted(durations_ms)
+    p95_index = min(len(sorted_durations) - 1, math.ceil(len(sorted_durations) * 0.95) - 1)
+    return {
+        "calls": len(sorted_durations),
+        "total_ms": sum(sorted_durations),
+        "average_ms": statistics.mean(sorted_durations),
+        "p50_ms": statistics.median(sorted_durations),
+        "p95_ms": sorted_durations[p95_index],
+        "max_ms": max(sorted_durations),
+    }
+
+
+def _groots_span_rows(result: dict[str, Any]) -> list[list[object]]:
+    grouped: dict[str, list[float]] = {}
+    errors: dict[str, int] = {}
+
+    for span in _collect_groots_spans(result):
+        name = str(span.get("name", "unknown"))
+        duration = span.get("durationMs")
+        if isinstance(duration, int | float):
+            grouped.setdefault(name, []).append(float(duration))
+        if span.get("status") == "error":
+            errors[name] = errors.get(name, 0) + 1
+
+    rows: list[list[object]] = []
+    for name, durations in sorted(grouped.items()):
+        span_stats = _duration_stats(durations)
+        rows.append(
+            [
+                name,
+                span_stats["calls"],
+                _as_seconds(float(span_stats["total_ms"]) / 1000),
+                _as_seconds(float(span_stats["average_ms"]) / 1000),
+                _as_seconds(float(span_stats["p50_ms"]) / 1000),
+                _as_seconds(float(span_stats["p95_ms"]) / 1000),
+                _as_seconds(float(span_stats["max_ms"]) / 1000),
+                errors.get(name, 0),
+            ]
+        )
+    return rows
+
+
+def _groots_question_latency_rows(result: dict[str, Any]) -> list[list[object]]:
+    rows: list[list[object]] = []
+
+    for question in _question_results(result):
+        telemetry = question.get("groots_telemetry", {})
+        if not isinstance(telemetry, dict):
+            continue
+
+        spans = telemetry.get("spans", [])
+        if not isinstance(spans, list):
+            continue
+
+        total_ms = 0.0
+        query_plan_ms = 0.0
+        search_ms = 0.0
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            duration = span.get("durationMs")
+            if not isinstance(duration, int | float):
+                continue
+            total_ms += float(duration)
+            if span.get("name") == "memory.retrieve.query_plan":
+                query_plan_ms += float(duration)
+            elif span.get("name") == "memory.retrieve.search_documents":
+                search_ms += float(duration)
+
+        if total_ms <= 0:
+            continue
+
+        rows.append([
+            question.get("qa_index", "n/a"),
+            "yes" if question.get("is_correct") else "no",
+            _as_seconds(total_ms / 1000),
+            _as_seconds(query_plan_ms / 1000),
+            _as_seconds(search_ms / 1000),
+            str(question.get("question", ""))[:96],
+        ])
+
+    return sorted(rows, key=lambda row: int(row[0]) if isinstance(row[0], int) else str(row[0]))
+
+
+def _benchmark_question_latency_rows(result: dict[str, Any]) -> list[list[object]]:
+    rows: list[list[object]] = []
+
+    for question in _question_results(result):
+        latency = question.get("benchmark_latency", {})
+        if not isinstance(latency, dict):
+            continue
+
+        total = latency.get("total_seconds")
+        answer = latency.get("answer_seconds")
+        evaluation = latency.get("evaluation_seconds")
+        if not isinstance(total, int | float):
+            continue
+
+        groots_latency = question.get("groots_latency", {})
+        retrieve = None
+        generation = None
+        if isinstance(groots_latency, dict):
+            retrieve = groots_latency.get("retrieve_seconds")
+            generation = groots_latency.get("generation_seconds")
+
+        rows.append([
+            question.get("qa_index", "n/a"),
+            "yes" if question.get("is_correct") else "no",
+            _as_seconds(float(total)),
+            _as_seconds(float(answer)) if isinstance(answer, int | float) else "n/a",
+            _as_seconds(float(evaluation)) if isinstance(evaluation, int | float) else "n/a",
+            _as_seconds(float(retrieve)) if isinstance(retrieve, int | float) else "n/a",
+            _as_seconds(float(generation)) if isinstance(generation, int | float) else "n/a",
+            str(question.get("question", ""))[:80],
+        ])
+
+    return sorted(rows, key=lambda row: int(row[0]) if isinstance(row[0], int) else str(row[0]))
 
 
 def evaluated_counts(result: dict[str, Any]) -> tuple[int, int]:
@@ -187,6 +340,45 @@ def render_single_report(result: dict[str, Any], *, source_path: str | Path | No
                     "",
                 ]
             )
+
+    groots_rows = _groots_span_rows(result)
+    if groots_rows:
+        lines.extend(
+            [
+                "",
+                "## Groots Memory Observability",
+                "",
+                _table(["Span", "Calls", "Total", "Average", "p50", "p95", "Max", "Errors"], groots_rows),
+            ]
+        )
+
+    groots_question_rows = _groots_question_latency_rows(result)
+    if groots_question_rows:
+        lines.extend(
+            [
+                "",
+                "## Groots Memory Per-Question Retrieve Latency",
+                "",
+                _table(
+                    ["QA", "Correct", "Retrieve", "Query plan", "Search", "Question"],
+                    groots_question_rows,
+                ),
+            ]
+        )
+
+    benchmark_latency_rows = _benchmark_question_latency_rows(result)
+    if benchmark_latency_rows:
+        lines.extend(
+            [
+                "",
+                "## Benchmark QA Latency",
+                "",
+                _table(
+                    ["QA", "Correct", "Total", "Answer", "Eval", "Groots retrieve", "Answer generation", "Question"],
+                    benchmark_latency_rows,
+                ),
+            ]
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -303,6 +495,35 @@ def render_comparison_report(results: list[tuple[Path, dict[str, Any]]]) -> str:
                 ]
             )
         lines.append("")
+
+    observability_rows = []
+    for path, result in results:
+        spans = _collect_groots_spans(result)
+        if not spans:
+            continue
+        total_ms = sum(
+            float(span.get("durationMs", 0))
+            for span in spans
+            if isinstance(span.get("durationMs"), int | float)
+        )
+        errors = sum(1 for span in spans if span.get("status") == "error")
+        observability_rows.append([
+            backend_label(result),
+            len(spans),
+            _as_seconds(total_ms / 1000),
+            errors,
+            path.name,
+        ])
+
+    if observability_rows:
+        lines.extend(
+            [
+                "## Groots Memory Observability",
+                "",
+                _table(["Backend", "Spans", "Total Span Time", "Errors", "JSON"], observability_rows),
+                "",
+            ]
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 
