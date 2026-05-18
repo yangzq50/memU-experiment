@@ -123,6 +123,8 @@ class ToolBasedMemoryTester:
             self.groots_backend = GrootsTypeScriptMemoryBackend(
                 self.memory_dir / "groots_memory_store.json",
                 enabled_space_ids=[self.groots_space_id],
+                memory_extractor="llm",
+                memory_model=chat_deployment,
             )
             self.groots_agent = GrootsMemoryExperimentAgent(self.groots_backend)
         

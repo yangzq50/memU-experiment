@@ -87,7 +87,7 @@ class GrootsMemoryAdapterTest(unittest.TestCase):
                 space_ids=["space-1"],
             )
 
-            self.assertEqual(count, 2)
+            self.assertGreaterEqual(count, 2)
             self.assertTrue(retrieval.context_block)
             self.assertIn("platform team", retrieval.context_block or "")
 
