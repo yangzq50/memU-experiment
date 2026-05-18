@@ -83,7 +83,6 @@ class GrootsTypeScriptMemoryBackend:
         *,
         enabled_space_ids: Optional[List[str]] = None,
         groots_repo: str | Path | None = None,
-        memory_extractor: str = "rules",
         memory_model: Optional[str] = None,
     ):
         self.storage_path = Path(storage_path)
@@ -91,7 +90,6 @@ class GrootsTypeScriptMemoryBackend:
         self.enabled_space_ids = enabled_space_ids or ["experiment-space"]
         self.groots_repo = Path(groots_repo or os.getenv("GROOTS_REPO_PATH") or DEFAULT_GROOTS_REPO)
         self.fixture_path = self.groots_repo / "apps/api/bin/space-memory-fixture.ts"
-        self.memory_extractor = memory_extractor
         self.memory_model = memory_model
 
     def _run_fixture(self, payload: Dict[str, object]) -> Dict[str, object]:
@@ -100,7 +98,6 @@ class GrootsTypeScriptMemoryBackend:
 
         command = ["bun", "run", str(self.fixture_path)]
         env = os.environ.copy()
-        env["GROOTS_MEMORY_EXTRACTOR"] = self.memory_extractor
         if self.memory_model:
             env["GROOTS_MEMORY_MODEL"] = self.memory_model
         completed = subprocess.run(
