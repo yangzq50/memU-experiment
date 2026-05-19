@@ -69,6 +69,9 @@ class GrootsMemoryBackend(Protocol):
     def memorize(self, turn: GrootsMemoryTurn) -> int:
         ...
 
+    def refresh_derived_views(self, *, space_id: str) -> int:
+        ...
+
 
 class GrootsTypeScriptMemoryBackend:
     """
@@ -236,6 +239,19 @@ class GrootsTypeScriptMemoryBackend:
                     "spaceId": space_id,
                     "title": title,
                     "version": version,
+                },
+                "storagePath": str(self.storage_path),
+            }
+        )
+        return int(response["searchDocumentCount"])
+
+    def refresh_derived_views(self, *, space_id: str) -> int:
+        response = self._run_fixture(
+            {
+                "command": "refreshDerivedViews",
+                "enabledSpaceIds": self.enabled_space_ids,
+                "input": {
+                    "spaceId": space_id,
                 },
                 "storagePath": str(self.storage_path),
             }

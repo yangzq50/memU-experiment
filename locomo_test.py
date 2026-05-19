@@ -1030,6 +1030,12 @@ class ToolBasedMemoryTester:
                         'reason': 'Memory already exists'
                     })
 
+            if self.memory_backend == "groots-ts" and self.groots_backend is not None:
+                logger.info("Refreshing Groots derived memory views after session ingestion")
+                refreshed_documents = self.groots_backend.refresh_derived_views(
+                    space_id=self.groots_space_id,
+                )
+                logger.info(f"Refreshed {refreshed_documents} Groots derived memory view documents")
 
             if getattr(args_global, 'no_eval', False):
                 question_results = []
