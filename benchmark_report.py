@@ -75,7 +75,8 @@ def result_title(result: dict[str, Any]) -> str:
         return backend_label(result)
     return (
         f"{backend_label(result)} / {args.get('chat_deployment', 'unknown-model')} / "
-        f"sample={args.get('sample_use', 'all')} / category={args.get('category', 'all')}"
+        f"sample={args.get('sample_use', 'all')} / category={args.get('category', 'all')} / "
+        f"qa_set={args.get('qa_index_set', 'all')}"
     )
 
 
@@ -301,6 +302,7 @@ def render_single_report(result: dict[str, Any], *, source_path: str | Path | No
         f"- Eval model: `{args.get('eval_deployment', args.get('chat_deployment', 'n/a'))}`",
         f"- Data file: `{args.get('data_file', 'n/a')}`",
         f"- Sample: `{args.get('sample_use', 'all')}`",
+        f"- QA index set: `{args.get('qa_index_set', 'all')}`",
         f"- Category: `{category_label(args.get('category')) if args.get('category') else 'all'}`",
         "",
         "## Summary",

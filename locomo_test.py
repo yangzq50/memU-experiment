@@ -15,7 +15,7 @@ import json
 import os
 import sys
 import ast
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from datetime import datetime
 import time
 from pathlib import Path
@@ -66,11 +66,14 @@ class ToolBasedMemoryTester:
         api_version: str = "2024-02-01",
         memory_dir: str = "memory",
         max_workers: int = 3,
+        build_workers: int = 1,
+        qa_workers: Optional[int] = None,
         category_filter: Optional[List[str]] = None,
         eval_deployment: Optional[str] = None,
         memory_backend: str = "memu",
         groots_space_id: str = "locomo-space",
-        disable_embeddings: bool = False
+        disable_embeddings: bool = False,
+        qa_index_set: Optional[Set[int]] = None
     ):
         """Initialize Tool-based Memory Tester"""
         self.memory_backend = memory_backend
@@ -128,7 +131,10 @@ class ToolBasedMemoryTester:
             self.groots_agent = GrootsMemoryExperimentAgent(self.groots_backend)
         
         self.max_workers = max_workers
+        self.build_workers = build_workers
+        self.qa_workers = qa_workers or max_workers
         self.category_filter = category_filter
+        self.qa_index_set = qa_index_set
         self.results = []
         self.processing_time = 0.0
         # Initialize error log file
@@ -136,9 +142,14 @@ class ToolBasedMemoryTester:
         self.error_log_file = f"qa_error_log_{self.log_timestamp}.txt"
         self._init_error_log()
         
-        logger.info(f"Tool-based Memory Tester initialized with backend={self.memory_backend} (max_workers={max_workers})")
+        logger.info(
+            f"Tool-based Memory Tester initialized with backend={self.memory_backend} "
+            f"(build_workers={self.build_workers}, qa_workers={self.qa_workers})"
+        )
         if category_filter:
             logger.info(f"Category filter enabled: {category_filter}")
+        if qa_index_set is not None:
+            logger.info(f"QA index set enabled: {len(qa_index_set)} questions")
         logger.info(f"QA error log file: {self.error_log_file}")
 
     def _init_error_log(self):
@@ -748,8 +759,13 @@ class ToolBasedMemoryTester:
         qa_items = []
         skipped_count = 0
         category_filtered_count = 0
+        qa_index_filtered_count = 0
         for i, qa_item in enumerate(qa_data):
             if 'question' in qa_item and 'answer' in qa_item:
+                if self.qa_index_set is not None and i not in self.qa_index_set:
+                    qa_index_filtered_count += 1
+                    continue
+
                 # Check category filter
                 if self.category_filter:
                     item_category = str(qa_item.get('category', 'Unknown'))
@@ -774,6 +790,9 @@ class ToolBasedMemoryTester:
         
         if category_filtered_count > 0:
             logger.info(f"Filtered out {category_filtered_count} QA items due to category filter {self.category_filter}, processing {len(qa_items)} items")
+
+        if qa_index_filtered_count > 0:
+            logger.info(f"Filtered out {qa_index_filtered_count} QA items due to QA index set, processing {len(qa_items)} items")
         
         if not qa_items:
             logger.warning("No valid QA items to process")
@@ -976,7 +995,11 @@ class ToolBasedMemoryTester:
                 
                 # Process sessions in parallel using MemAgent
                 # session_results = self._process_sessions_parallel(sessions, characters_without_memory, self.max_workers)
-                session_results = self._process_sessions_parallel(sessions, characters_without_memory, max_workers=1)
+                session_results = self._process_sessions_parallel(
+                    sessions,
+                    characters_without_memory,
+                    max_workers=self.build_workers,
+                )
                 
                 # Log results
                 successful_sessions = sum(1 for result in session_results if result.get('success', False))
@@ -999,7 +1022,12 @@ class ToolBasedMemoryTester:
                 question_results = []
             else:
                 # Answer QA questions in parallel
-                question_results = self._process_qa_parallel(qa_data, characters, conversation_data, self.max_workers)
+                question_results = self._process_qa_parallel(
+                    qa_data,
+                    characters,
+                    conversation_data,
+                    self.qa_workers,
+                )
             
             # Calculate category statistics
             category_stats = {}
@@ -1334,6 +1362,35 @@ class ToolBasedMemoryTester:
         print(f"\n{'='*60}")
 
 
+def _parse_qa_index_set(value: str) -> Set[int]:
+    """Parse a named JSON question set or an inline list of zero-based QA indices."""
+    path = Path(value)
+
+    if path.exists():
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+        if isinstance(payload, dict):
+            raw_indices = payload.get("qa_indices")
+        else:
+            raw_indices = payload
+    else:
+        raw_indices = ast.literal_eval(value)
+
+    if not isinstance(raw_indices, list):
+        raise ValueError("qa-index-set must contain a list of indices or a JSON object with qa_indices")
+
+    indices: Set[int] = set()
+    for raw_index in raw_indices:
+        if not isinstance(raw_index, int) or raw_index < 0:
+            raise ValueError(f"Invalid QA index in set: {raw_index!r}")
+        indices.add(raw_index)
+
+    if not indices:
+        raise ValueError("qa-index-set cannot be empty")
+
+    return indices
+
+
 def main():
     """Main function to run the enhanced memory test"""
     import argparse
@@ -1341,6 +1398,7 @@ def main():
     parser = argparse.ArgumentParser(description='Enhanced Memory Test with Unified MemAgent')
     parser.add_argument('--data-file', default='data/locomo10.json', help='Path to test data file')
     parser.add_argument('--sample-use', type=str, help='Sample indices to use. Can be a single number (e.g., "5" for first 5 samples) or a list (e.g., "[0, 1, 3, 5]" for specific indices). If not provided, use all samples.')
+    parser.add_argument('--qa-index-set', type=str, help='Path to a JSON question set file or a Python-style list of zero-based QA indices to evaluate after the memory build.')
     parser.add_argument('--memory-dir', default='memory', help='Directory for memory files')
     parser.add_argument('--chat-deployment', default='gpt-4.1-mini', help='Azure OpenAI chat deployment')
     parser.add_argument('--eval-deployment', help='Model used for grading answers. Defaults to --chat-deployment')
@@ -1348,7 +1406,9 @@ def main():
     parser.add_argument('--groots-space-id', default='locomo-space', help='Space id used by the Groots memory fixture')
     parser.add_argument('--disable-embeddings', action='store_true', help='Disable embedding clients and use text fallback retrieval')
     # parser.add_argument('--chat-deployment', default='DeepSeek-V3-0324', help='Azure OpenAI chat deployment')
-    parser.add_argument('--max-workers', type=int, default=5, help='Maximum number of parallel workers for session processing')
+    parser.add_argument('--max-workers', type=int, default=5, help='Default maximum number of parallel workers.')
+    parser.add_argument('--build-workers', type=int, default=1, help='Parallel workers for memory construction. Keep 1 for stateful backends unless explicitly testing concurrency.')
+    parser.add_argument('--qa-workers', type=int, help='Parallel workers for QA/evaluation. Defaults to --max-workers.')
     parser.add_argument('--category', type=str, help='Filter questions by category. Can be a single category (e.g., "1") or comma-separated categories (e.g., "0,2,3"). If not provided, use all categories.')
     parser.add_argument('--use-image', type=lambda x: x.lower() != 'false', default=True, help='Insert image caption to conversation (default: True)')
     parser.add_argument('--use-profile', type=str, default="none", help='Use the profile to answer the questions')
@@ -1376,6 +1436,14 @@ def main():
             logger.error(f"Failed to parse category filter '{args.category}': {e}")
             logger.info("Using all categories instead")
             category_filter = None
+
+    qa_index_set = None
+    if args.qa_index_set:
+        try:
+            qa_index_set = _parse_qa_index_set(args.qa_index_set)
+        except Exception as e:
+            logger.error(f"Failed to parse QA index set '{args.qa_index_set}': {e}")
+            raise
     
     # Initialize tester
     tester = ToolBasedMemoryTester(
@@ -1386,7 +1454,10 @@ def main():
         groots_space_id=args.groots_space_id,
         disable_embeddings=args.disable_embeddings,
         max_workers=args.max_workers,
-        category_filter=category_filter
+        build_workers=args.build_workers,
+        qa_workers=args.qa_workers,
+        category_filter=category_filter,
+        qa_index_set=qa_index_set
     )
 
     # Prepare results with comprehensive argument information (automatically includes all parser args)

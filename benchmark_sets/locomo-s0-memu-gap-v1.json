@@ -1,0 +1,24 @@
+{
+  "name": "locomo-s0-memu-gap-v1",
+  "description": "Sample 0 questions missed by memU but answered correctly by Groots memory.",
+  "sample_use": "[0]",
+  "source_results": [
+    "reports/results/groots-ts-deepseek-v4-flash-s0-all-observed.json",
+    "reports/results/memu-text-deepseek-v4-flash-s0-all.json"
+  ],
+  "count": 6,
+  "category_counts": {
+    "1": 2,
+    "2": 1,
+    "3": 1,
+    "4": 2
+  },
+  "qa_indices": [
+    7,
+    19,
+    30,
+    33,
+    88,
+    103
+  ]
+}
