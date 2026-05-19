@@ -9,6 +9,12 @@ from typing import Dict, List
 from .base import BaseLLMClient, LLMResponse
 
 
+def _uses_completion_token_limit(model: str) -> bool:
+    normalized = model.lower()
+
+    return normalized.startswith("gpt-5") or normalized.startswith("o")
+
+
 class OpenAIClient(BaseLLMClient):
     """OpenAI Client Implementation"""
 
@@ -89,8 +95,11 @@ class OpenAIClient(BaseLLMClient):
                 "model": model,
                 "messages": processed_messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens,
             }
+            if _uses_completion_token_limit(model):
+                api_kwargs["max_completion_tokens"] = max_tokens
+            else:
+                api_kwargs["max_tokens"] = max_tokens
 
             # Add function calling parameters if provided
             if "tools" in kwargs:
