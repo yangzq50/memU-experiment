@@ -15,7 +15,7 @@ dotenv.load_dotenv(dotenv_path=Path(".tmp/memu-experiment.env"), override=False)
 def check_openai_config():
     """Check OpenAI configuration"""
     print("=" * 50)
-    print("OPENAI CONFIGURATION")
+    print("CHAT/EVAL OPENAI-COMPATIBLE CONFIGURATION")
     print("=" * 50)
     
     api_key = os.getenv("OPENAI_API_KEY")
@@ -30,6 +30,32 @@ def check_openai_config():
         print(f"  Value: {base_url}")
     else:
         print(f"  Default: https://api.openai.com/v1")
+
+    embedding_key = os.getenv("EMBEDDING_OPENAI_API_KEY")
+    embedding_base_url = os.getenv("EMBEDDING_OPENAI_BASE_URL")
+    embedding_model = os.getenv("EMBEDDING_OPENAI_MODEL")
+
+    print("\n" + "=" * 50)
+    print("MEMU EMBEDDING OPENAI CONFIGURATION")
+    print("=" * 50)
+    print(
+        "EMBEDDING_OPENAI_API_KEY: "
+        f"{'✓ Set' if embedding_key else '✗ Not set (falls back to OPENAI_API_KEY)'}"
+    )
+    if embedding_key:
+        print(
+            "  Value: "
+            f"{embedding_key[:10]}...{embedding_key[-4:] if len(embedding_key) > 14 else embedding_key}"
+        )
+    print(
+        "EMBEDDING_OPENAI_BASE_URL: "
+        f"{embedding_base_url or 'https://api.openai.com/v1 (OpenAI SDK default)'}"
+    )
+    print(
+        "EMBEDDING_OPENAI_MODEL: "
+        f"{embedding_model or 'text-embedding-ada-002 (memU default)'}"
+    )
+    print("  Usage: only memU embedding/semantic retrieval should use EMBEDDING_OPENAI_*.")
     
     return bool(api_key)
 
@@ -46,6 +72,9 @@ def check_model_name(model_name):
     print("  - OPENAI_API_KEY")
     print("Optional environment variables:")
     print("  - OPENAI_BASE_URL (if using custom endpoint)")
+    print("  - EMBEDDING_OPENAI_API_KEY (OpenAI key for memU embeddings only)")
+    print("  - EMBEDDING_OPENAI_BASE_URL")
+    print("  - EMBEDDING_OPENAI_MODEL")
     
     return check_openai_config()
 

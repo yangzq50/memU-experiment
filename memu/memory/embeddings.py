@@ -51,12 +51,23 @@ class EmbeddingClient:
         try:
             import openai
 
-            # Get API key from kwargs or environment
-            api_key = kwargs.get("api_key") or os.getenv("OPENAI_API_KEY")
+            # Embeddings may use a different OpenAI account/provider than chat.
+            # Prefer embedding-specific variables so OpenAI-compatible chat
+            # endpoints such as DeepSeek can continue using OPENAI_API_KEY.
+            api_key = (
+                kwargs.get("api_key")
+                or os.getenv("EMBEDDING_OPENAI_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+            )
+            base_url = kwargs.get("base_url") or os.getenv("EMBEDDING_OPENAI_BASE_URL")
             if not api_key:
                 raise ValueError("OpenAI API key not provided")
 
-            self.client = openai.OpenAI(api_key=api_key)
+            client_params = {"api_key": api_key}
+            if base_url:
+                client_params["base_url"] = base_url
+
+            self.client = openai.OpenAI(**client_params)
             logger.info(f"OpenAI embedding client initialized with model: {self.model}")
 
         except ImportError:
@@ -269,9 +280,15 @@ def get_default_embedding_client() -> Optional[EmbeddingClient]:
         EmbeddingClient if configuration is found, None otherwise
     """
     # Try OpenAI first
-    if os.getenv("OPENAI_API_KEY"):
+    if os.getenv("EMBEDDING_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"):
         try:
-            return create_embedding_client("openai")
+            return create_embedding_client(
+                "openai",
+                api_key=os.getenv("EMBEDDING_OPENAI_API_KEY")
+                or os.getenv("OPENAI_API_KEY"),
+                base_url=os.getenv("EMBEDDING_OPENAI_BASE_URL"),
+                model=os.getenv("EMBEDDING_OPENAI_MODEL", "text-embedding-ada-002"),
+            )
         except Exception as e:
             logger.warning(f"Failed to create OpenAI embedding client: {e}")
 
