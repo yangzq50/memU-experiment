@@ -356,11 +356,24 @@ class ToolBasedMemoryTester:
     def _format_session_transcript(self, session_utterances: List[Dict], session_date: str) -> str:
         """Format a LoCoMo session as plain text for the Groots memory fixture."""
         lines = [f"Session date: {session_date}"]
+        use_image = getattr(args_global, 'use_image', False)
+
         for utterance in session_utterances:
             speaker = utterance.get("speaker", "Unknown")
             text = utterance.get("text", "")
             if text:
                 lines.append(f"{speaker}: {text}")
+            if use_image:
+                visual_lines = []
+                caption = utterance.get("blip_caption")
+                query = utterance.get("query")
+                if isinstance(caption, str) and caption.strip():
+                    visual_lines.append(f"caption: {caption.strip()}")
+                if isinstance(query, str) and query.strip():
+                    visual_lines.append(f"query: {query.strip()}")
+                if visual_lines:
+                    lines.append(f"{speaker} shared visual context: {'; '.join(visual_lines)}")
+
         return "\n\n".join(lines)
 
     def _process_single_session_with_groots(self, session_data: Tuple[str, List[Dict], str], characters: List[str]) -> Dict:
