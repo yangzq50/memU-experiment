@@ -86,6 +86,7 @@ class GrootsTypeScriptMemoryBackend:
         enabled_space_ids: Optional[List[str]] = None,
         groots_repo: str | Path | None = None,
         memory_model: Optional[str] = None,
+        fixture_timeout_seconds: Optional[float] = None,
     ):
         self.storage_path = Path(storage_path)
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +94,9 @@ class GrootsTypeScriptMemoryBackend:
         self.groots_repo = Path(groots_repo or os.getenv("GROOTS_REPO_PATH") or DEFAULT_GROOTS_REPO)
         self.fixture_path = self.groots_repo / "apps/api/bin/space-memory-fixture.ts"
         self.memory_model = memory_model
+        self.fixture_timeout_seconds = fixture_timeout_seconds or float(
+            os.getenv("GROOTS_FIXTURE_TIMEOUT_SECONDS", "300")
+        )
         self.last_telemetry: Dict[str, object] = {}
 
     def _run_fixture(self, payload: Dict[str, object]) -> Dict[str, object]:
@@ -103,15 +107,25 @@ class GrootsTypeScriptMemoryBackend:
         env = os.environ.copy()
         if self.memory_model:
             env["GROOTS_MEMORY_MODEL"] = self.memory_model
-        completed = subprocess.run(
-            command,
-            cwd=self.groots_repo,
-            env=env,
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=self.groots_repo,
+                env=env,
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self.fixture_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise TimeoutError(
+                "Groots memory fixture timed out\n"
+                f"command: {' '.join(command)}\n"
+                f"timeout_seconds: {self.fixture_timeout_seconds}\n"
+                f"stdout: {error.stdout or ''}\n"
+                f"stderr: {error.stderr or ''}"
+            ) from error
         if completed.returncode != 0:
             raise RuntimeError(
                 "Groots memory fixture failed\n"
