@@ -79,6 +79,7 @@ class ToolBasedMemoryTester:
         self.memory_backend = memory_backend
         self.groots_space_id = groots_space_id
         self.disable_embeddings = disable_embeddings
+        self.chat_deployment = chat_deployment
         self.memory_dir = Path(memory_dir)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
@@ -126,7 +127,7 @@ class ToolBasedMemoryTester:
             self.groots_backend = GrootsTypeScriptMemoryBackend(
                 self.memory_dir / "groots_memory_store.json",
                 enabled_space_ids=[self.groots_space_id],
-                memory_model=chat_deployment,
+                memory_model=self.chat_deployment,
             )
             self.groots_agent = GrootsMemoryExperimentAgent(self.groots_backend)
         
@@ -954,11 +955,25 @@ class ToolBasedMemoryTester:
                 'evaluation_text': ""
             }
     
-    def process_sample(self, sample: Dict) -> Dict:
+    def _activate_groots_sample_backend(self, sample_index: int) -> None:
+        """Use an isolated Groots memory store for one independent LoCoMo sample."""
+        sample_dir = self.memory_dir / f"sample_{sample_index:04d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        self.groots_backend = GrootsTypeScriptMemoryBackend(
+            sample_dir / "groots_memory_store.json",
+            enabled_space_ids=[self.groots_space_id],
+            memory_model=self.chat_deployment,
+        )
+        self.groots_agent = GrootsMemoryExperimentAgent(self.groots_backend)
+
+    def process_sample(self, sample: Dict, sample_index: int = 1) -> Dict:
         """Process one sample using function tools"""
         start_time = time.time()
         
         try:
+            if self.memory_backend == "groots-ts":
+                self._activate_groots_sample_backend(sample_index)
+
             conversation_data = sample['conversation']
             qa_data = sample.get('qa', [])
             
@@ -983,9 +998,12 @@ class ToolBasedMemoryTester:
                 characters_with_memory = []
                 characters_without_memory = characters
             elif self.memory_backend == "groots-ts":
-                store_path = self.memory_dir / "groots_memory_store.json"
+                if self.groots_backend is None:
+                    raise RuntimeError("Groots memory backend is not initialized")
+
+                store_path = self.groots_backend.storage_path
                 if store_path.exists() and store_path.stat().st_size > 0:
-                    logger.info("Groots memory store already exists, skipping session processing")
+                    logger.info(f"Groots memory store already exists for sample {sample_index}, skipping session processing")
                     characters_with_memory = characters
                     characters_without_memory = []
                 else:
@@ -1201,7 +1219,7 @@ class ToolBasedMemoryTester:
                 for i, sample in enumerate(data, 1):
                     logger.info(f"\n=== Processing Sample {i}/{len(data)} ===")
                     
-                    result = self.process_sample(sample)
+                    result = self.process_sample(sample, sample_index=i)
                     all_results.append(result)
                     
                     if result['success']:
